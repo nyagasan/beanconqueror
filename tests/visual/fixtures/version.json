@@ -1,0 +1,25 @@
+[
+  {
+    "alreadyDisplayedVersions": ["8.6.0"],
+    "updatedDataVersions": [
+      "UPDATE_1",
+      "UPDATE_2",
+      "UPDATE_3",
+      "UPDATE_4",
+      "UPDATE_5",
+      "UPDATE_6",
+      "UPDATE_7",
+      "UPDATE_8",
+      "UPDATE_9",
+      "UPDATE_10",
+      "UPDATE_11",
+      "UPDATE_12",
+      "UPDATE_13",
+      "UPDATE_14"
+    ],
+    "config": {
+      "uuid": "00000000-0000-0000-0000-00000000000b",
+      "unix_timestamp": 1705320000
+    }
+  }
+]

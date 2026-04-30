@@ -38,13 +38,27 @@ export interface SeedData {
   PREPARATION: unknown[];
   /**
    * Settings entries. Must be seeded with `welcome_page_showed: true` (and
-   * `matomo_analytics_popup_shown: true`, etc.) so the first-launch welcome
-   * popover does not obscure every page during the snapshot run. Without this
-   * key, `UISettingsStorage` writes default settings on boot and
-   * `app.component.ts → __checkWelcomePage()` presents the full-screen welcome
-   * modal — which is what every page would end up looking like.
+   * `matomo_analytics: true`, etc.) so the first-launch welcome popover and
+   * the analytics-consent popover do not obscure every page during the
+   * snapshot run. Without this key, `UISettingsStorage` writes default
+   * settings on boot and `app.component.ts → __checkWelcomePage()` presents
+   * the full-screen welcome modal — which is what every page would end up
+   * looking like.
    */
   SETTINGS: unknown[];
+  /**
+   * Version entries. Must be seeded so that:
+   *   - `updatedDataVersions` contains every `UPDATE_n` from
+   *     `uiUpdate.ts`, otherwise `__checkUpdate()` runs the data-version
+   *     migrations on boot. In particular `UPDATE_8` resets
+   *     `settings.matomo_analytics = undefined`, which then triggers the
+   *     analytics-consent popover regardless of what we seeded into
+   *     SETTINGS.
+   *   - `alreadyDisplayedVersions` contains the current app version
+   *     (returned from `Version.getUpdatedVersions()`) so the
+   *     `UpdatePopoverComponent` "what's new" modal is not shown.
+   */
+  VERSION: unknown[];
 }
 
 export function loadSeedData(): SeedData {
@@ -54,6 +68,7 @@ export function loadSeedData(): SeedData {
     MILL: readFixture('mills.json') as unknown[],
     PREPARATION: readFixture('preparations.json') as unknown[],
     SETTINGS: readFixture('settings.json') as unknown[],
+    VERSION: readFixture('version.json') as unknown[],
   };
 }
 
