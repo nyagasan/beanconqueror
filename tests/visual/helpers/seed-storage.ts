@@ -5,16 +5,23 @@ import type { Page } from '@playwright/test';
 
 /**
  * Seeds the Beanconqueror @ionic/storage IndexedDB with deterministic fixtures
- * before the app boots. This must run via `page.addInitScript` so the keys are
- * present by the time `UIStorage.init()` calls `storage.create()`.
+ * BEFORE the Angular app boots.
+ *
+ * Approach: `seedStorage()` first navigates to a same-origin static asset
+ * (so no Angular bundle loads), then writes the fixtures into IndexedDB via
+ * `page.evaluate(async ...)`. By awaiting that promise we guarantee the data
+ * is committed before the test navigates to the real route under test, which
+ * eliminates the race between our seed transaction and LocalForage's first
+ * `getItem` call.
  *
  * Storage layout:
  *   - DB name:   `__baristaDB`        (configured in src/main.ts)
- *   - DB store:  `_ionickv`           (default LocalForage object store)
- *   - Keys:      'BEANS', 'BREWS', 'MILL', 'PREPARATION', 'SETTINGS', ...
+ *   - DB store:  `_ionickv`           (default @ionic/storage object store)
+ *   - Keys:      'BEANS', 'BREWS', 'MILL', 'PREPARATION', 'SETTINGS'
  *               (see src/services/ui*Storage.ts → super('NAME'))
  *
- * Each value is the JSON-stringified array as written by uiStorage.set().
+ * Each value is stored as the parsed object — Ionic Storage / LocalForage
+ * handle serialization internally.
  */
 
 const FIXTURES_DIR = join(__dirname, '..', 'fixtures');
@@ -50,143 +57,158 @@ export function loadSeedData(): SeedData {
   };
 }
 
+/** Path to a same-origin static asset that does NOT bootstrap the Angular app.
+ *  Visiting this first establishes the dev-server origin so we can write to
+ *  IndexedDB before navigating to the actual route under test. `en.json` is
+ *  always present because it is required by `provideTranslateHttpLoader`. */
+const STATIC_ORIGIN_STUB = '/assets/i18n/en.json';
+
+/** 2024-01-15T12:00:00 UTC — fixed "now" so brew "x days ago" labels remain
+ *  stable regardless of when the suite runs. */
+const FROZEN_NOW = Date.UTC(2024, 0, 15, 12, 0, 0);
+
 /**
- * Installs an init script on the page that writes the given seed data into
- * IndexedDB before any Beanconqueror code runs. Also freezes Date.now and the
- * default time zone for deterministic screenshots.
+ * Installs init scripts that freeze `Date` and disable CSS animations on every
+ * navigation in the page. This must run before any app code, so it uses
+ * `addInitScript`. Storage seeding is intentionally NOT done here — see
+ * `seedStorage` below.
  */
-export async function installSeedScripts(
-  page: Page,
-  seed: SeedData,
-): Promise<void> {
-  await page.addInitScript(
-    ({
+export async function installInitScripts(page: Page): Promise<void> {
+  await page.addInitScript((frozenNow: number) => {
+    // --- Freeze "now" so any time-relative UI is stable. ---------------
+    const RealDate = Date;
+    const FixedDate = class extends RealDate {
+      constructor(...args: unknown[]) {
+        if (args.length === 0) {
+          super(frozenNow);
+          return;
+        }
+        super(...(args as ConstructorParameters<typeof RealDate>));
+      }
+      static now(): number {
+        return frozenNow;
+      }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).Date = FixedDate as unknown as DateConstructor;
+
+    // --- Disable animations/transitions globally. ----------------------
+    const style = document.createElement('style');
+    style.id = 'visual-regression-no-animations';
+    style.textContent = `
+      *, *::before, *::after {
+        animation-duration: 0s !important;
+        animation-delay: 0s !important;
+        transition-duration: 0s !important;
+        transition-delay: 0s !important;
+        caret-color: transparent !important;
+      }
+    `;
+    const inject = () => {
+      if (document.head && !document.getElementById(style.id)) {
+        document.head.appendChild(style);
+      }
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', inject, { once: true });
+    } else {
+      inject();
+    }
+  }, FROZEN_NOW);
+}
+
+/**
+ * Seeds the Beanconqueror Ionic Storage IndexedDB with the given fixtures.
+ *
+ * This is done by navigating to a static asset on the same origin (so no
+ * Angular bundle boots) and then awaiting an IndexedDB write inside the page
+ * via `page.evaluate`. Doing it this way — instead of via `addInitScript` —
+ * eliminates the race between our seed transaction and LocalForage's first
+ * `getItem` call: by the time the test navigates to the real route, the data
+ * is already committed.
+ *
+ * Critically, this also seeds the `SETTINGS` key with `welcome_page_showed:
+ * true`, otherwise `app.component.ts → __checkWelcomePage()` will display the
+ * full-screen welcome popover over every captured page.
+ */
+export async function seedStorage(page: Page, seed: SeedData): Promise<void> {
+  // Establish the dev-server origin without booting the Angular app.
+  const response = await page.goto(STATIC_ORIGIN_STUB, {
+    waitUntil: 'domcontentloaded',
+  });
+  if (!response || !response.ok()) {
+    throw new Error(
+      `Failed to load static origin stub at ${STATIC_ORIGIN_STUB}: ` +
+        `${response ? response.status() : 'no response'}`,
+    );
+  }
+
+  await page.evaluate(
+    async ({
       seedData,
       dbName,
       storeName,
-      frozenNow,
     }: {
       seedData: Record<string, unknown>;
       dbName: string;
       storeName: string;
-      frozenNow: number;
     }) => {
-      // --- 1. Freeze "now" so any time-relative UI is stable. -----------
-      const RealDate = Date;
-      const FixedDate = class extends RealDate {
-        constructor(...args: unknown[]) {
-          if (args.length === 0) {
-            super(frozenNow);
-            return;
-          }
-          super(...(args as ConstructorParameters<typeof RealDate>));
-        }
-        static now(): number {
-          return frozenNow;
-        }
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (globalThis as any).Date = FixedDate as unknown as DateConstructor;
-
-      // --- 2. Disable animations/transitions globally. ------------------
-      const style = document.createElement('style');
-      style.id = 'visual-regression-no-animations';
-      style.textContent = `
-        *, *::before, *::after {
-          animation-duration: 0s !important;
-          animation-delay: 0s !important;
-          transition-duration: 0s !important;
-          transition-delay: 0s !important;
-          caret-color: transparent !important;
-        }
-      `;
-      const inject = () => {
-        if (document.head && !document.getElementById(style.id)) {
-          document.head.appendChild(style);
-        }
-      };
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', inject, { once: true });
-      } else {
-        inject();
+      // Open (and create if needed) the LocalForage object store, then write
+      // every seed key in a single readwrite transaction.
+      function openWithStore(version?: number): Promise<IDBDatabase> {
+        return new Promise<IDBDatabase>((resolve, reject) => {
+          const req =
+            version === undefined
+              ? indexedDB.open(dbName)
+              : indexedDB.open(dbName, version);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(storeName)) {
+              db.createObjectStore(storeName);
+            }
+          };
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => resolve(req.result);
+          req.onblocked = () => reject(new Error('IDB open blocked'));
+        });
       }
 
-      // --- 3. Seed IndexedDB synchronously before app boot. -------------
-      const seedPromise = new Promise<void>((resolve) => {
-        const open = indexedDB.open(dbName, 2);
-        open.onupgradeneeded = () => {
-          const db = open.result;
-          if (!db.objectStoreNames.contains(storeName)) {
-            db.createObjectStore(storeName);
-          }
-        };
-        open.onerror = () => resolve();
-        open.onsuccess = () => {
-          const db = open.result;
-          if (!db.objectStoreNames.contains(storeName)) {
-            db.close();
-            // Bump version to create the store, then re-seed.
-            const reopen = indexedDB.open(dbName, db.version + 1);
-            reopen.onupgradeneeded = () => {
-              reopen.result.createObjectStore(storeName);
-            };
-            reopen.onsuccess = () => {
-              writeAll(reopen.result);
-            };
-            reopen.onerror = () => resolve();
-            return;
-          }
-          writeAll(db);
-        };
+      let db = await openWithStore();
+      if (!db.objectStoreNames.contains(storeName)) {
+        const currentVersion = db.version;
+        db.close();
+        db = await openWithStore(currentVersion + 1);
+      }
 
-        function writeAll(db: IDBDatabase) {
-          const tx = db.transaction(storeName, 'readwrite');
-          const store = tx.objectStore(storeName);
-          for (const [key, value] of Object.entries(seedData)) {
-            // Ionic Storage stores values as-is (LocalForage handles
-            // serialization). Storing the parsed object is what the app
-            // expects when calling `storage.get(key)`.
-            store.put(value, key);
-          }
-          tx.oncomplete = () => {
-            db.close();
-            resolve();
-          };
-          tx.onerror = () => {
-            db.close();
-            resolve();
-          };
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        const store = tx.objectStore(storeName);
+        for (const [key, value] of Object.entries(seedData)) {
+          // Ionic Storage stores values as-is (LocalForage handles
+          // serialization). Storing the parsed object is what the app
+          // expects when calling `storage.get(key)`.
+          store.put(value, key);
         }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
       });
-
-      // Block app boot until seeding completes by patching window.fetch
-      // for the index document. In practice we just await before the app
-      // queries storage; addInitScript runs before any page script, so we
-      // attach the promise to `window` and have nothing else to do.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (globalThis as any).__visualSeedReady = seedPromise;
+      db.close();
     },
     {
       seedData: seed as unknown as Record<string, unknown>,
       dbName: '__baristaDB',
       storeName: '_ionickv',
-      // 2024-01-15T12:00:00 UTC — fixed point so brew "x days ago" labels
-      // remain stable regardless of when the suite runs.
-      frozenNow: Date.UTC(2024, 0, 15, 12, 0, 0),
     },
   );
 }
 
 /**
- * Waits for the app shell to be ready — Ionic content rendered, fonts loaded,
- * and the seed script promise resolved.
+ * Waits for the app shell to be ready — Ionic content rendered and fonts
+ * loaded.
  */
 export async function waitForAppReady(page: Page): Promise<void> {
   await page.waitForLoadState('domcontentloaded');
-  await page.waitForFunction(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    () => (globalThis as any).__visualSeedReady !== undefined,
-  );
   // Wait for fonts to settle so glyphs are stable across runs.
   await page.evaluate(() => document.fonts?.ready);
   // Wait for at least one Ionic page element to attach.
