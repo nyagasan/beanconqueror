@@ -26,9 +26,12 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # (a) PR verification — runs Playwright against the PR branch and, on failure,
-  #     publishes diff/actual/expected images to the `visual-regression-reports`
-  #     branch and posts a Markdown summary on the PR.
+  # (a) PR verification — runs Playwright against the PR branch.
+  #
+  #   • No baselines yet → generates them, commits back to the PR branch, and
+  #     posts a "baselines created" comment with a preview table.
+  #   • Baselines exist   → compares screenshots; on failure publishes
+  #     diff/actual/expected images and posts a diff comment.
   # ---------------------------------------------------------------------------
   visual-test:
     if: >
@@ -58,13 +61,105 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps webkit
 
+      # ── Detect whether baselines exist ──────────────────────────────────────
+      - name: Check if baselines exist
+        id: check
+        shell: bash
+        run: |
+          if find tests/visual/__screenshots__ -name '*.png' -type f 2>/dev/null | grep -q .; then
+            echo "has_baselines=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_baselines=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Path A: no baselines → generate, commit, comment ────────────────────
+      - name: Generate baselines (first run)
+        if: steps.check.outputs.has_baselines == 'false'
+        run: pnpm test:visual:update
+
+      - name: Commit and push new baselines
+        if: steps.check.outputs.has_baselines == 'false'
+        id: commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/visual/__screenshots__
+          if git diff --cached --quiet; then
+            echo "nothing=true" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(git diff --cached --name-only | wc -l | tr -d ' ')
+            git commit -m "chore(visual): generate initial baselines [skip ci]"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git push origin "HEAD:refs/heads/${HEAD_REF}"
+            echo "nothing=false" >> "$GITHUB_OUTPUT"
+            echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+            # Collect baseline filenames for the PR comment.
+            find tests/visual/__screenshots__ -name '*.png' -type f | sort | xargs -I{} basename {} \
+              > /tmp/baseline-list.txt
+            echo "listed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on PR — baselines created
+        if: >
+          steps.commit.conclusion == 'success' &&
+          steps.commit.outputs.nothing != 'true' &&
+          github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          COUNT: ${{ steps.commit.outputs.count }}
+        with:
+          script: |
+            const fs = require('fs');
+            const headRef = process.env.HEAD_REF;
+            const count = process.env.COUNT;
+            const rawBase =
+              `https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}` +
+              `/${headRef}/tests/visual/__screenshots__/pages.spec.ts-snapshots`;
+
+            const listFile = '/tmp/baseline-list.txt';
+            const names = fs.existsSync(listFile)
+              ? fs.readFileSync(listFile, 'utf8').trim().split('\n').filter(Boolean)
+              : [];
+
+            const rows = names.map(n =>
+              `| \`${n}\` | ![${n}](${rawBase}/${n}) |`
+            );
+
+            const body = [
+              '### 📸 Visual baselines generated',
+              '',
+              `No baselines existed — **${count} screenshot(s)** were captured and committed to this branch.`,
+              '',
+              'Subsequent CI runs will compare against these baselines.',
+              'Use the `update-visual-baselines` label if you need to regenerate them.',
+              '',
+              rows.length
+                ? ['| file | preview |', '| --- | --- |', ...rows].join('\n')
+                : '_Screenshot list unavailable._',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      # ── Path B: baselines exist → run comparison ─────────────────────────────
       - name: Run visual regression tests
         id: visual
+        if: steps.check.outputs.has_baselines == 'true'
         continue-on-error: true
         run: pnpm test:visual
 
       - name: Collect failure artifacts
-        if: steps.visual.outcome == 'failure'
+        if: steps.check.outputs.has_baselines == 'true' && steps.visual.outcome == 'failure'
         id: collect
         shell: bash
         run: |
@@ -84,7 +179,7 @@ jobs:
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Upload Playwright report (always)
-        if: steps.visual.outcome == 'failure'
+        if: steps.check.outputs.has_baselines == 'true' && steps.visual.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-${{ github.run_id }}
@@ -92,7 +187,10 @@ jobs:
           retention-days: 14
 
       - name: Publish diff images to reports branch
-        if: steps.visual.outcome == 'failure' && github.event_name == 'pull_request'
+        if: >
+          steps.check.outputs.has_baselines == 'true' &&
+          steps.visual.outcome == 'failure' &&
+          github.event_name == 'pull_request'
         id: publish
         shell: bash
         env:
@@ -143,7 +241,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Comment on PR with diff URLs
-        if: steps.visual.outcome == 'failure' && github.event_name == 'pull_request'
+        if: >
+          steps.check.outputs.has_baselines == 'true' &&
+          steps.visual.outcome == 'failure' &&
+          github.event_name == 'pull_request'
         uses: actions/github-script@v8
         env:
           RAW_BASE: ${{ steps.publish.outputs.raw_base }}
@@ -203,7 +304,7 @@ jobs:
             });
 
       - name: Fail job if visual tests failed
-        if: steps.visual.outcome == 'failure'
+        if: steps.check.outputs.has_baselines == 'true' && steps.visual.outcome == 'failure'
         run: exit 1
 
   # ---------------------------------------------------------------------------
