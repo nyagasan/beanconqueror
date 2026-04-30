@@ -56,7 +56,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps webkit
 
       - name: Run visual regression tests
         id: visual
@@ -240,7 +240,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm exec playwright install --with-deps webkit
 
       - name: Regenerate baselines
         run: pnpm test:visual:update
