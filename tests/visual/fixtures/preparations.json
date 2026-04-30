@@ -1,0 +1,28 @@
+[
+  {
+    "name": "Espresso",
+    "note": "Demo espresso preparation.",
+    "type": "ESPRESSO",
+    "style_type": "ESPRESSO",
+    "config": { "uuid": "00000000-0000-0000-0000-000000000101", "unix_timestamp": 1704067000 },
+    "finished": false,
+    "use_custom_parameters": false,
+    "manage_parameters": {},
+    "default_last_coffee_parameters": {},
+    "tools": [],
+    "attachments": []
+  },
+  {
+    "name": "V60",
+    "note": "Demo pour-over preparation.",
+    "type": "V60",
+    "style_type": "FILTER",
+    "config": { "uuid": "00000000-0000-0000-0000-000000000102", "unix_timestamp": 1704067050 },
+    "finished": false,
+    "use_custom_parameters": false,
+    "manage_parameters": {},
+    "default_last_coffee_parameters": {},
+    "tools": [],
+    "attachments": []
+  }
+]

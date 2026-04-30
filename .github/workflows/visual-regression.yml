@@ -1,0 +1,288 @@
+name: Visual Regression
+
+# Fork-only execution.
+# All jobs are guarded by `if: github.repository == 'nyagasan/beanconqueror'`
+# so that this workflow is a no-op on the upstream `graphefruit/beanconqueror`
+# repository (or any other fork).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: visual-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPORT_BRANCH: visual-regression-reports
+  REPORT_DIR_BASE: runs
+  GC_RETENTION_DAYS: 30
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # (a) PR verification — runs Playwright against the PR branch and, on failure,
+  #     publishes diff/actual/expected images to the `visual-regression-reports`
+  #     branch and posts a Markdown summary on the PR.
+  # ---------------------------------------------------------------------------
+  visual-test:
+    if: >
+      github.repository == 'nyagasan/beanconqueror' &&
+      !(github.event_name == 'pull_request' && github.event.action == 'labeled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR / branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run visual regression tests
+        id: visual
+        continue-on-error: true
+        run: pnpm test:visual
+
+      - name: Collect failure artifacts
+        if: steps.visual.outcome == 'failure'
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="visual-out"
+          mkdir -p "$OUT"
+          # Playwright writes -actual.png, -expected.png and -diff.png next to
+          # the snapshot under test-results/.
+          if [ -d tests/visual/test-results ]; then
+            find tests/visual/test-results \
+              -type f \( -name '*-actual.png' -o -name '*-expected.png' -o -name '*-diff.png' \) \
+              -exec cp --parents {} "$OUT" \;
+          fi
+          if [ -d tests/visual/playwright-report ]; then
+            cp -r tests/visual/playwright-report "$OUT/playwright-report"
+          fi
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Playwright report (always)
+        if: steps.visual.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_id }}
+          path: tests/visual/playwright-report
+          retention-days: 14
+
+      - name: Publish diff images to reports branch
+        if: steps.visual.outcome == 'failure' && github.event_name == 'pull_request'
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          OUT_DIR: ${{ steps.collect.outputs.out }}
+        run: |
+          set -euo pipefail
+          REPORT_PATH="${REPORT_DIR_BASE}/${PR_NUMBER}/${RUN_ID}"
+          WORK=$(mktemp -d)
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Clone or initialize the orphan reports branch.
+          if git ls-remote --exit-code --heads origin "$REPORT_BRANCH" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$REPORT_BRANCH" \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
+          else
+            git clone --depth 1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORK"
+            (cd "$WORK" && git checkout --orphan "$REPORT_BRANCH" && git rm -rf . >/dev/null 2>&1 || true)
+          fi
+          mkdir -p "$WORK/$REPORT_PATH"
+          if [ -d "$OUT_DIR" ]; then
+            cp -r "$OUT_DIR/." "$WORK/$REPORT_PATH/"
+          fi
+
+          # GC: drop runs older than $GC_RETENTION_DAYS days.
+          if [ -d "$WORK/${REPORT_DIR_BASE}" ]; then
+            find "$WORK/${REPORT_DIR_BASE}" -mindepth 2 -maxdepth 2 -type d \
+              -mtime +${GC_RETENTION_DAYS} -exec rm -rf {} +
+          fi
+
+          (
+            cd "$WORK"
+            git add -A
+            if git diff --cached --quiet; then
+              echo "No new artifacts to publish."
+            else
+              git commit -m "visual: PR #${PR_NUMBER} run ${RUN_ID}"
+              git push origin "HEAD:${REPORT_BRANCH}"
+            fi
+          )
+
+          {
+            echo "report_path=${REPORT_PATH}"
+            echo "raw_base=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPORT_BRANCH}/${REPORT_PATH}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR with diff URLs
+        if: steps.visual.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        env:
+          RAW_BASE: ${{ steps.publish.outputs.raw_base }}
+          RUN_URL: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const out = process.env.GITHUB_WORKSPACE + '/visual-out';
+            const rawBase = process.env.RAW_BASE;
+            const runUrl = process.env.RUN_URL;
+
+            function* walk(dir) {
+              if (!fs.existsSync(dir)) return;
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const p = path.join(dir, entry.name);
+                if (entry.isDirectory()) yield* walk(p);
+                else yield p;
+              }
+            }
+
+            const groups = new Map();
+            for (const file of walk(out)) {
+              const rel = path.relative(out, file).split(path.sep).join('/');
+              const m = rel.match(/^(.*)-(actual|expected|diff)\.png$/);
+              if (!m) continue;
+              const [, base, kind] = m;
+              if (!groups.has(base)) groups.set(base, {});
+              groups.get(base)[kind] = rel;
+            }
+
+            const rows = [];
+            for (const [base, files] of [...groups.entries()].sort()) {
+              const cell = (k) => files[k] ? `[${k}](${rawBase}/${files[k]})` : '—';
+              rows.push(`| \`${base}\` | ${cell('expected')} | ${cell('actual')} | ${cell('diff')} |`);
+            }
+
+            const body = [
+              '### 📸 Visual regression diff',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              rows.length
+                ? ['| screen | expected | actual | diff |',
+                   '| --- | --- | --- | --- |',
+                   ...rows].join('\n')
+                : '_No diff images were produced. Check the run log for details._',
+              '',
+              'Add the `update-visual-baselines` label to this PR to regenerate baselines automatically.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail job if visual tests failed
+        if: steps.visual.outcome == 'failure'
+        run: exit 1
+
+  # ---------------------------------------------------------------------------
+  # (b) Baseline auto-update — runs only when the `update-visual-baselines`
+  #     label is applied to a PR. Regenerates baselines and pushes them back
+  #     to the PR's head branch, then removes the label.
+  # ---------------------------------------------------------------------------
+  update-baselines:
+    if: >
+      github.repository == 'nyagasan/beanconqueror' &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'update-visual-baselines'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm exec playwright install --with-deps chromium
+
+      - name: Regenerate baselines
+        run: pnpm test:visual:update
+
+      - name: Commit and push baselines
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/visual/__screenshots__
+          if git diff --cached --quiet; then
+            echo "No baseline changes to commit."
+            echo "changed=false" >> "$GITHUB_ENV"
+          else
+            git commit -m "chore(visual): update baselines"
+            git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+            echo "changed=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Remove label and comment
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const changed = process.env.changed === 'true';
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'update-visual-baselines',
+              });
+            } catch (e) {
+              core.info(`Could not remove label: ${e.message}`);
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: changed
+                ? '✅ Visual baselines updated and pushed to this branch.'
+                : 'ℹ️ Visual baselines were already up to date — nothing to commit.',
+            });

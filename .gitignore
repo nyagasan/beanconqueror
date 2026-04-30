@@ -42,3 +42,8 @@ UserInterfaceState.xcuserstate
 .windsurf/
 .github/copilot-instructions.md
 
+# Playwright visual regression artifacts (baselines under __screenshots__/ are committed)
+tests/visual/test-results/
+tests/visual/playwright-report/
+/playwright/.cache/
+

@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Demo Hand Grinder",
+    "note": "Used for filter brews.",
+    "config": { "uuid": "00000000-0000-0000-0000-000000000201", "unix_timestamp": 1704067100 },
+    "finished": false,
+    "attachments": []
+  },
+  {
+    "name": "Demo Electric Grinder",
+    "note": "Used for espresso.",
+    "config": { "uuid": "00000000-0000-0000-0000-000000000202", "unix_timestamp": 1704067150 },
+    "finished": false,
+    "attachments": []
+  }
+]
