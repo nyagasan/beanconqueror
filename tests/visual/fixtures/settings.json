@@ -1,0 +1,12 @@
+[
+  {
+    "welcome_page_showed": true,
+    "matomo_analytics": true,
+    "matomo_analytics_popup_shown": true,
+    "meticulous_help_was_shown": true,
+    "config": {
+      "uuid": "00000000-0000-0000-0000-00000000000a",
+      "unix_timestamp": 1705320000
+    }
+  }
+]

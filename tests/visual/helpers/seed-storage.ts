@@ -29,6 +29,15 @@ export interface SeedData {
   BREWS: unknown[];
   MILL: unknown[];
   PREPARATION: unknown[];
+  /**
+   * Settings entries. Must be seeded with `welcome_page_showed: true` (and
+   * `matomo_analytics_popup_shown: true`, etc.) so the first-launch welcome
+   * popover does not obscure every page during the snapshot run. Without this
+   * key, `UISettingsStorage` writes default settings on boot and
+   * `app.component.ts → __checkWelcomePage()` presents the full-screen welcome
+   * modal — which is what every page would end up looking like.
+   */
+  SETTINGS: unknown[];
 }
 
 export function loadSeedData(): SeedData {
@@ -37,6 +46,7 @@ export function loadSeedData(): SeedData {
     BREWS: readFixture('brews.json') as unknown[],
     MILL: readFixture('mills.json') as unknown[],
     PREPARATION: readFixture('preparations.json') as unknown[],
+    SETTINGS: readFixture('settings.json') as unknown[],
   };
 }
 

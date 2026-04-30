@@ -91,6 +91,10 @@ The keys correspond to the storage classes in `src/services/`:
 | `brews.json`        | `BREWS`       | `src/services/uiBrewStorage.ts`          |
 | `mills.json`        | `MILL`        | `src/services/uiMillStorage.ts`          |
 | `preparations.json` | `PREPARATION` | `src/services/uiPreparationStorage.ts`   |
+| `settings.json`     | `SETTINGS`    | `src/services/uiSettingsStorage.ts`      |
+
+`settings.json` must keep `welcome_page_showed: true` so the first-launch
+welcome popover does not obscure every page during snapshotting.
 
 Always use the fixed UUIDs already in the JSON files (`00000000-...-0001`) so
 that screenshots stay reproducible.
