@@ -69,8 +69,7 @@ export async function installSeedScripts(
             super(frozenNow);
             return;
           }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          super(...(args as [any]));
+          super(...(args as ConstructorParameters<typeof RealDate>));
         }
         static now(): number {
           return frozenNow;

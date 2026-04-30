@@ -58,6 +58,8 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {
+        // The `ci` configuration is defined in angular.json (`projects.app.architect.serve.configurations.ci`).
+        // It currently inherits the default build target with `progress: false`.
         command: `pnpm exec ng serve --configuration=ci --port ${PORT} --host 127.0.0.1`,
         url: BASE_URL,
         reuseExistingServer: !process.env.CI,
